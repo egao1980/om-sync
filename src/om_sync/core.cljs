@@ -34,7 +34,7 @@
               nil)]
     [tag edn]))
 
-(defn om-sync
+(defn om-sync-impl
   "ALPHA: Creates a reusable sync componet. Data must be a map containing
   :url and :coll keys. :url must identify a server endpoint that can
   takes EDN data via POST for create, PUT for update, and DELETE for
@@ -78,7 +78,7 @@
     :url, :tag, :edn, :on-success, :on-error, and :tx-data on the
     provided channel. This higher level operations such as server
     request batching and multiple om-sync component coordination."
-  ([data owner] (om-sync data owner nil))
+  ([data owner] (om-sync-impl data owner nil))
   ([{:keys [url coll] :as data} owner opts]
     (assert (not (nil? url)) "om-sync component not given url")
     (reify
@@ -124,7 +124,4 @@
           (when kill-chan
             (put! kill-chan (js/Date.)))
           (when txs
-            (async/unsub (om/get-shared owner :tx-chan) :txs txs))))
-      om/IRender
-      (render [_]
-        (om/build (:view opts) coll)))))
+            (async/unsub (om/get-shared owner :tx-chan) :txs txs)))))))
