@@ -10,28 +10,37 @@
    :update :put
    :delete :delete})
 
+;; TODO error handling
 (defn ^:private sync-server [url tag edn]
   (let [res-chan (chan)]
     (edn-xhr
-      {:method (type->method tag)
-       :url url
-       :data edn
-       :on-error (fn [err] (put! res-chan err))
-       :on-complete (fn [res] (put! res-chan res))})
+      {:method      (type->method tag)
+       :url         url
+       :data        edn
+       :on-error    (fn [err] (put! res-chan err))
+       :on-complete (fn [res] (put! res-chan (or res ::empty)))})
     res-chan))
 
 (defn ^:private tag-and-edn [coll-path path tag-fn id-key tx-data]
-  (let [tag (if-not (nil? tag-fn)
-              (tag-fn tx-data)
-              (tx-tag tx-data))
-        edn (condp = tag
-              :create (:new-value tx-data)
-              :update (let [ppath (popn (- (count path) (inc (count coll-path))) path)
-                            m (select-keys (get-in (:new-state tx-data) ppath) [id-key])
-                            rel (sub path coll-path)]
-                        (assoc-in m (rest rel) (:new-value tx-data)))
-              :delete (-> tx-data :old-value id-key)
-              nil)]
+  (let [tag-raw (if-not (nil? tag-fn)
+                  (tag-fn tx-data)
+                  (:tag tx-data))
+        tag (if (keyword? tag-raw)
+              tag-raw
+              (first tag-raw))
+
+        tag-data (if (keyword? tag-raw)
+                   nil
+                   (second tag-raw))
+        edn (or tag-data
+                (condp = tag
+                  :create (:new-value tx-data)
+                  :update (let [ppath (popn (- (count path) (inc (count coll-path))) path)
+                                m (select-keys (get-in (:new-state tx-data) ppath) [id-key])
+                                rel (sub path coll-path)]
+                            (assoc-in m (rest rel) (:new-value tx-data)))
+                  :delete (-> tx-data :old-value id-key)
+                  nil))]
     [tag edn]))
 
 (defn om-sync-impl
@@ -80,48 +89,50 @@
     request batching and multiple om-sync component coordination."
   ([data owner] (om-sync-impl data owner nil))
   ([{:keys [url coll] :as data} owner opts]
-    (assert (not (nil? url)) "om-sync component not given url")
-    (reify
-      om/IInitState
-      (init-state [_]
-        {:kill-chan (chan)})
-      om/IWillMount
-      (will-mount [_]
-        (let [{:keys [id-key filter tag-fn sync-chan]} opts
-              {:keys [on-success on-error]} opts
-              kill-chan (om/get-state owner :kill-chan)
-              tx-chan (om/get-shared owner :tx-chan)
-              txs (chan)
-              coll-path (om/path coll)]
-          (assert (not (nil? tx-chan))
-            "om-sync requires shared :tx-chan pub channel with :txs topic")
-          (async/sub tx-chan :txs txs)
-          (om/set-state! owner :txs txs)
-          (go (loop []
-                (let [[v c] (alts! [txs kill-chan])]
-                  (if (= c kill-chan)
-                    :done
-                    (let [[{:keys [path new-value new-state] :as tx-data} _] v]
-                      (when (and (subpath? coll-path path)
-                              (or (nil? filter) (filter tx-data)))
-                        (let [[tag edn] (tag-and-edn coll-path path tag-fn id-key tx-data)
-                              tx-data (assoc tx-data ::tag tag)]
-                          (if-not (nil? sync-chan)
-                            (>! sync-chan
-                              {:url url :tag tag :edn edn
-                               :listen-path coll-path
-                               :on-success on-success
-                               :on-error on-error
-                               :tx-data tx-data})
-                            (let [res (<! (sync-server url tag edn))]
-                              (if (error? res)
-                                (on-error res tx-data)
-                                (on-success res tx-data))))))
-                      (recur))))))))
-      om/IWillUnmount
-      (will-unmount [_]
-        (let [{:keys [kill-chan txs]} (om/get-state owner)]
-          (when kill-chan
-            (put! kill-chan (js/Date.)))
-          (when txs
-            (async/unsub (om/get-shared owner :tx-chan) :txs txs)))))))
+   (assert (not (nil? url)) "om-sync component not given url")
+   (reify
+     om/IInitState
+     (init-state [_]
+       {:kill-chan (chan)})
+     om/IWillMount
+     (will-mount [_]
+       (let [{:keys [id-key filter tag-fn sync-chan]} opts
+             {:keys [on-success on-error]} opts
+             kill-chan (om/get-state owner :kill-chan)
+             tx-chan (om/get-shared owner :tx-chan)
+             txs (chan)
+             coll-path (om/path coll)]
+         (assert (not (nil? tx-chan))
+                 "om-sync requires shared :tx-chan pub channel with :txs topic")
+         (async/sub tx-chan :txs txs)
+         (om/set-state! owner :txs txs)
+         (go (loop []
+               (let [[v c] (alts! [txs kill-chan])]
+                 (if (= c kill-chan)
+                   :done
+                   (let [[{:keys [path new-value new-state] :as tx-data} _] v]
+                     (when (and (subpath? coll-path path)
+                                (or (nil? filter) (filter tx-data)))
+                       (let [[tag edn] (tag-and-edn coll-path path tag-fn id-key tx-data)
+                             tx-data (assoc tx-data ::tag tag)]
+                         (if-not (nil? sync-chan)
+                           (>! sync-chan
+                               {:url         url :tag tag :edn edn
+                                :listen-path coll-path
+                                :on-success  on-success
+                                :on-error    on-error
+                                :tx-data     tx-data})
+                           (let [res (<! (sync-server url tag edn))]
+                             (if (error? res)
+                               (on-error res tx-data)
+                               (on-success
+                                 (if (= ::empty res) nil res)
+                                 tx-data))))))
+                     (recur))))))))
+     om/IWillUnmount
+     (will-unmount [_]
+       (let [{:keys [kill-chan txs]} (om/get-state owner)]
+         (when kill-chan
+           (put! kill-chan (js/Date.)))
+         (when txs
+           (async/unsub (om/get-shared owner :tx-chan) :txs txs)))))))
