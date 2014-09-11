@@ -12,7 +12,7 @@
       res)))
 
 (defn sub [p0 p1]
-  (vec (drop (- (count p0) (count p1)) p0)))
+  (vec (drop (count p1) p0)))
 
 (defn tx-tag [{:keys [tag] :as tx-data}]
   (if (keyword? tag)
